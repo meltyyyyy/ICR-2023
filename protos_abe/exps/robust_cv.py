@@ -59,6 +59,7 @@ def training(df, greeks):
     outer_cv_score = []  # store all cv scores of outer loop inference
     inner_cv_score = []  # store all cv scores of inner loop training
     models = []
+    weights = []
 
     for fold in range(5):
         train_df = df[df["fold"] != fold]
@@ -128,10 +129,13 @@ def training(df, greeks):
             preds += model.predict(X_valid)
         preds = preds / len(inner_models)
         cv_score = metric(y_valid, preds)
+
         print(f"20% data CV score: {metric.__name__}: {cv_score:.5f}")
         print(f'{"*" * 50}\n')
+
         outer_cv_score.append(cv_score)
         models.append(inner_models)
+        weights.append(1 / cv_score)
     print(
         f"80% data average CV score: {metric.__name__}: {np.mean(inner_cv_score):.5f}"
     )
@@ -142,14 +146,14 @@ def training(df, greeks):
     )
     print(f'{"*" * 50}\n')
 
-    return models
+    return models, weights
 
 
-def inferring(X, models):
+def inferring(X, models, weights):
     y = np.zeros(len(X))
-    for model_list in models:
+    for i, model_list in enumerate(models):
         for model in model_list:
-            y += model.predict(X)
+            y += weights[i] * model.predict(X)
     return y / sum([len(inner_models) for inner_models in models])
 
 
@@ -157,8 +161,8 @@ def main():
     train, test, _, greeks = load_data()
     df, test_df = feature_eng(train, test)
     feat_cols = df.columns[1:-1]
-    models = training(df, greeks)
-    predictions = inferring(test_df[feat_cols], models)
+    models, weights = training(df, greeks)
+    predictions = inferring(test_df[feat_cols], models, weights)
 
     test["class_1"] = predictions
     test["class_0"] = 1 - predictions
