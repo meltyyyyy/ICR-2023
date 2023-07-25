@@ -1,10 +1,12 @@
 import warnings
 
+import seaborn as sns
 import numpy as np
 import pandas as pd
 from lightgbm import LGBMClassifier
 from sklearn.model_selection import StratifiedKFold
 from sklearn.preprocessing import StandardScaler
+import matplotlib.pyplot as plt
 from utils.constants import INT_DENOMINATORS
 from utils.metrics import balanced_log_loss, lgb_metric
 from utils.model_selection import MultilabelStratifiedKFold
@@ -48,7 +50,7 @@ def to_int(df):
     return df
 
 
-def training(df, greeks):
+def training(df, feat_cols, target, greeks):
     kf = MultilabelStratifiedKFold(n_splits=5, shuffle=True, random_state=42)
     df["fold"] = -1
 
@@ -58,6 +60,7 @@ def training(df, greeks):
     metric = balanced_log_loss
     outer_cv_score = []  # store all cv scores of outer loop inference
     inner_cv_score = []  # store all cv scores of inner loop training
+    feat_imps = []
     models = []
     weights = []
 
@@ -66,12 +69,12 @@ def training(df, greeks):
         valid_df = df[df["fold"] == fold]
 
         X_train, y_train = (
-            train_df.drop(["Id", "Class", "fold"], axis=1),
-            train_df["Class"],
+            train_df.drop(["Id", "Class", "fold"], axis=1).loc[:, feat_cols],
+            train_df[target],
         )
         X_valid, y_valid = (
-            valid_df.drop(["Id", "Class", "fold"], axis=1),
-            valid_df["Class"],
+            valid_df.drop(["Id", "Class", "fold"], axis=1).loc[:, feat_cols],
+            valid_df[target],
         )
 
         lgb = LGBMClassifier(
@@ -95,7 +98,7 @@ def training(df, greeks):
         print(
             f"Outer Loop fold {fold}, Inner Loop Training with {X_train.shape[0]} samples, {X_train.shape[1]} features"
         )
-        for inner_fold, (fit_idx, val_idx) in enumerate(cv.split(X=X_train, y=y_train)):
+        for fold, (fit_idx, val_idx) in enumerate(cv.split(X=X_train, y=y_train)):
             X_fit = X_train.iloc[fit_idx]
             X_val = X_train.iloc[val_idx]
             y_fit = y_train.iloc[fit_idx]
@@ -114,8 +117,9 @@ def training(df, greeks):
 
             val_score = balanced_log_loss(y_val, val_preds)
             best_iter = model.booster_.best_iteration
+            feat_imps.append(model.feature_importances_)
             print(
-                f"Fold: {inner_fold:>3}| {metric.__name__}: {val_score:.5f}"
+                f"Fold: {fold:>3}| {metric.__name__}: {val_score:.5f}"
                 f" | Best iteration: {best_iter:>4}"
             )
 
@@ -146,7 +150,7 @@ def training(df, greeks):
     )
     print(f'{"*" * 50}\n')
 
-    return models, weights
+    return models, weights, np.mean(feat_imps, axis=0)
 
 
 def inferring(X, models, weights):
@@ -157,11 +161,25 @@ def inferring(X, models, weights):
     return y / sum([len(inner_models) for inner_models in models])
 
 
+def plot_importance(feat_imps, feat_cols):
+    feat_imps = np.squeeze(feat_imps)  # flatten feat_imps to 1D array
+    feat_df = pd.DataFrame(feat_imps, index=feat_cols, columns=['importance'])
+    feat_df = feat_df.sort_values(by='importance', ascending=True)  # sort DataFrame by importance
+
+    plt.figure(figsize=(12, 6))
+    plt.title("Mean feature importance")
+    sns.barplot(x=feat_df['importance'], y=feat_df.index)  # use sorted DataFrame for plotting
+    plt.savefig("feat_imps.png")
+
+
 def main():
     train, test, _, greeks = load_data()
     df, test_df = feature_eng(train, test)
     feat_cols = df.columns[1:-1]
-    models, weights = training(df, greeks)
+    target = "Class"
+    
+    models, weights, feat_imps = training(df, feat_cols, target, greeks)
+    plot_importance(feat_imps, feat_cols)
     predictions = inferring(test_df[feat_cols], models, weights)
 
     test["class_1"] = predictions

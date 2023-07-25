@@ -1,4 +1,4 @@
-import exps.robust_cv
+import exps.feat_reduction
 
 if __name__ == "__main__":
-    exps.robust_cv.main()
+    exps.feat_reduction.main()
