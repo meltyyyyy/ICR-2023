@@ -11,6 +11,8 @@ from utils.metrics import balanced_log_loss, lgb_metric
 warnings.filterwarnings("ignore")
 
 COMP_PATH = "/kaggle/input/icr-identify-age-related-conditions"
+COLS = ['DE', 'EL', 'GH', 'FE', 'DY', 'EE', 'EU', 'CH', 'CD ', 'CC', 'GL', 'DL',
+       'EB', 'AF', 'FI', 'DN', 'DA', 'FL', 'CR', 'FR', 'AB', 'BQ', 'DU']
 
 
 def load_data():
@@ -58,11 +60,11 @@ def training(df, test_df, greeks):
         valid_ids = valid_df.Id.values.tolist()
 
         X_train, y_train = (
-            train_df.drop(["Id", "Class", "fold"], axis=1),
+            train_df.drop(["Id", "Class", "fold"], axis=1).loc[:, COLS],
             train_df["Class"],
         )
         X_valid, y_valid = (
-            valid_df.drop(["Id", "Class", "fold"], axis=1),
+            valid_df.drop(["Id", "Class", "fold"], axis=1).loc[:, COLS],
             valid_df["Class"],
         )
 
@@ -89,7 +91,7 @@ def training(df, test_df, greeks):
         )
 
         y_pred = lgb.predict_proba(X_valid)
-        preds_test = lgb.predict_proba(test_df.drop(["Id"], axis=1).values)
+        preds_test = lgb.predict_proba(test_df.drop(["Id"], axis=1).loc[:, COLS].values)
 
         final_test_predictions.append(preds_test)
         final_valid_predictions.update(dict(zip(valid_ids, y_pred)))

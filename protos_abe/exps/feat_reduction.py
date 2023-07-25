@@ -150,7 +150,7 @@ def training(df, feat_cols, target, greeks):
     )
     print(f'{"*" * 50}\n')
 
-    return models, weights, np.mean(feat_imps, axis=0)
+    return models, weights, np.mean(feat_imps, axis=0), np.mean(inner_cv_score), np.mean(outer_cv_score)
 
 
 def inferring(X, models, weights):
@@ -170,6 +170,7 @@ def plot_importance(feat_imps, feat_cols):
     plt.title("Mean feature importance")
     sns.barplot(x=feat_df['importance'], y=feat_df.index)  # use sorted DataFrame for plotting
     plt.savefig("feat_imps.png")
+    plt.close()
 
 
 def main():
@@ -178,17 +179,44 @@ def main():
     feat_cols = df.columns[1:-1]
     target = "Class"
     
-    models, weights, feat_imps = training(df, feat_cols, target, greeks)
+    _, _, feat_imps, inner_cv_score, outer_cv_score = training(df, feat_cols, target, greeks)
     plot_importance(feat_imps, feat_cols)
-    predictions = inferring(test_df[feat_cols], models, weights)
+    icv_scores = []
+    ocv_scores = []
+    feat_col_list = []
+    best_feat_cols = feat_cols
 
-    test["class_1"] = predictions
-    test["class_0"] = 1 - predictions
-
-    test_2 = pd.read_csv(f"{COMP_PATH}/test.csv")
-    test["Id"] = test_2["Id"]
-    df_submission = test.loc[:, ["Id", "class_0", "class_1"]]
-    df_submission.to_csv("submission.csv", index=False)
+    while len(feat_cols) > 10:
+        _, _, feat_imps, inner_cv_score, outer_cv_score = training(df,feat_cols, target, greeks)
+        if len(ocv_scores) > 1 and outer_cv_score < np.min(ocv_scores):
+            best_feat_cols = feat_cols
+            
+        icv_scores.append(inner_cv_score)
+        ocv_scores.append(outer_cv_score)
+        feat_col_list.append(feat_cols)
+        
+        feat_df = pd.DataFrame(feat_imps, index=feat_cols, columns=['importance'])
+        feat_df = feat_df.sort_values(by='importance', ascending=True)
+        feat_cols = feat_df.iloc[1:].index
+    
+    _, _, feat_imps, inner_cv_score, outer_cv_score = training(df,best_feat_cols, target, greeks)
+    plot_importance(feat_imps, best_feat_cols)
+    
+    plt.figure(figsize=(12, 6))
+    plt.plot(icv_scores, label='Inner CV score')
+    plt.plot(ocv_scores, label='Outer CV score')
+    plt.xlabel('Number of features dropped')
+    plt.ylabel('Metric score')
+    plt.legend()
+    plt.savefig('feat_reduction.png')
+    plt.close()
+    
+    lowest_score_indices = np.argsort(ocv_scores)[:5]
+    for rank, i in enumerate(lowest_score_indices):
+        with open(f'top{rank}_feat_cols.txt', 'w') as f:
+            f.write(str(feat_col_list[i]))
+            f.write(f'\nInner CV score: {icv_scores[i]:.5f}')
+            f.write(f'\nOuter CV score: {ocv_scores[i]:.5f}')
 
 
 if __name__ == "__main__":

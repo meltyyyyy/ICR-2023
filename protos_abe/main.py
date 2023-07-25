@@ -1,4 +1,4 @@
-import exps.feat_reduction
+import exps.baseline
 
 if __name__ == "__main__":
-    exps.feat_reduction.main()
+    exps.baseline.main()
