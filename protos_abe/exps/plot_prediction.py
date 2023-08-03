@@ -1,12 +1,12 @@
 import warnings
 
-import matplotlib.pyplot as plt
+import seaborn as sns
 import numpy as np
 import pandas as pd
-import seaborn as sns
 from lightgbm import LGBMClassifier
 from sklearn.model_selection import StratifiedKFold
 from sklearn.preprocessing import StandardScaler
+import matplotlib.pyplot as plt
 from utils.constants import INT_DENOMINATORS
 from utils.metrics import balanced_log_loss, lgb_metric
 from utils.model_selection import MultilabelStratifiedKFold
@@ -64,9 +64,9 @@ def training(df, feat_cols, target, greeks):
     models = []
     weights = []
 
-    for fold in range(5):
-        train_df = df[df["fold"] != fold]
-        valid_df = df[df["fold"] == fold]
+    for outer_fold in range(5):
+        train_df = df[df["fold"] != outer_fold]
+        valid_df = df[df["fold"] == outer_fold]
 
         X_train, y_train = (
             train_df.drop(["Id", "Class", "fold"], axis=1).loc[:, feat_cols],
@@ -96,7 +96,7 @@ def training(df, feat_cols, target, greeks):
         cv = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
         inner_models = []
         print(
-            f"Outer Loop fold {fold}, Inner Loop Training with {X_train.shape[0]} samples, {X_train.shape[1]} features"
+            f"Outer Loop fold {outer_fold}, Inner Loop Training with {X_train.shape[0]} samples, {X_train.shape[1]} features"
         )
         for fold, (fit_idx, val_idx) in enumerate(cv.split(X=X_train, y=y_train)):
             X_fit = X_train.iloc[fit_idx]
@@ -112,7 +112,7 @@ def training(df, feat_cols, target, greeks):
                 eval_metric=lgb_metric,
             )
             inner_models.append(model)
-            val_preds = model.predict(X_val)
+            val_preds = model.predict_proba(X_val)[:, 1]
             oof_inner[val_idx] = val_preds
 
             val_score = balanced_log_loss(y_val, val_preds)
@@ -122,7 +122,8 @@ def training(df, feat_cols, target, greeks):
                 f"Fold: {fold:>3}| {metric.__name__}: {val_score:.5f}"
                 f" | Best iteration: {best_iter:>4}"
             )
-
+        
+        plot_predictions_distribution(y_train, oof_inner, f"pred_dist{outer_fold}_80.png")
         mean_cv_score = metric(y_train, oof_inner)
         print(f"80% data CV score: {metric.__name__}: {mean_cv_score:.5f}")
         print(f'{"*" * 50}\n')
@@ -130,10 +131,10 @@ def training(df, feat_cols, target, greeks):
 
         preds = np.zeros(len(holdout))
         for model in inner_models:
-            preds += model.predict(X_valid)
+            preds += model.predict_proba(X_valid)[:, 1]
         preds = preds / len(inner_models)
+        plot_predictions_distribution(y_valid, preds, f"pred_dist{outer_fold}_20.png")
         cv_score = metric(y_valid, preds)
-
         print(f"20% data CV score: {metric.__name__}: {cv_score:.5f}")
         print(f'{"*" * 50}\n')
 
@@ -150,37 +151,41 @@ def training(df, feat_cols, target, greeks):
     )
     print(f'{"*" * 50}\n')
 
-    return (
-        models,
-        weights,
-        np.mean(feat_imps, axis=0),
-        np.mean(inner_cv_score),
-        np.mean(outer_cv_score),
-    )
+    return models, weights, np.mean(feat_imps, axis=0), np.mean(inner_cv_score), np.mean(outer_cv_score)
 
 
-def inferring(X, models, weights):
-    y = np.zeros(len(X))
-    for i, model_list in enumerate(models):
-        for model in model_list:
-            y += weights[i] * model.predict(X)
-    return y / sum([len(inner_models) for inner_models in models])
+def plot_predictions_distribution(true_values, predictions, title="pred_dist.png"):
+    fig, ax = plt.subplots(figsize=(12, 6))
+    indexes = np.arange(len(predictions))  # Create an array of index values
+    true_values = np.array(true_values)  # Ensure true_values is an array for element-wise comparison
+    predictions = np.array(predictions)  # Ensure predictions is an array for element-wise comparison
+
+    # Plot all predictions and true values
+    ax.scatter(indexes, true_values, label='True Values', s=10)
+
+    # Create a mask for incorrect predictions where prob > 0.5 but true label is 0
+    incorrect_mask_1 = (predictions > 0.5) & (true_values == 0)
+
+    # Create a mask for incorrect predictions where prob < 0.5 but true label is 1
+    incorrect_mask_2 = (predictions < 0.5) & (true_values == 1)
+
+    # Create a mask for correct predictions
+    correct_mask = (predictions >= 0.5) & (true_values == 1) | (predictions < 0.5) & (true_values == 0)
+
+    # Plot the predictions using the masks for coloring
+    ax.scatter(indexes[correct_mask], predictions[correct_mask], label='Correct Predictions', alpha=0.5, s=10, color='blue')
+    ax.scatter(indexes[incorrect_mask_1], predictions[incorrect_mask_1], label='prob > 0.5 but true label is 0', alpha=0.5, s=10, color='red')
+    ax.scatter(indexes[incorrect_mask_2], predictions[incorrect_mask_2], label='prob < 0.5 but true label is 1', alpha=0.5, s=10, color='green')
+
+    ax.set_xlabel('Index')
+    ax.set_ylabel('Probability')
+    plt.title('Scatter plot of Predictions and True Values')
+    plt.legend(bbox_to_anchor=(1.05, 1), loc='upper left')
+    plt.savefig(title, bbox_inches='tight')
+    plt.close(fig)
 
 
-def plot_importance(feat_imps, feat_cols):
-    feat_imps = np.squeeze(feat_imps)  # flatten feat_imps to 1D array
-    feat_df = pd.DataFrame(feat_imps, index=feat_cols, columns=["importance"])
-    feat_df = feat_df.sort_values(
-        by="importance", ascending=True
-    )  # sort DataFrame by importance
 
-    plt.figure(figsize=(12, 6))
-    plt.title("Mean feature importance")
-    sns.barplot(
-        x=feat_df["importance"], y=feat_df.index
-    )  # use sorted DataFrame for plotting
-    plt.savefig("feat_imps.png")
-    plt.close()
 
 
 def main():
@@ -188,51 +193,8 @@ def main():
     df, test_df = feature_eng(train, test)
     feat_cols = df.columns[1:-1]
     target = "Class"
-
-    _, _, feat_imps, inner_cv_score, outer_cv_score = training(
-        df, feat_cols, target, greeks
-    )
-    plot_importance(feat_imps, feat_cols)
-    icv_scores = []
-    ocv_scores = []
-    feat_col_list = []
-    best_feat_cols = feat_cols
-
-    while len(feat_cols) > 10:
-        _, _, feat_imps, inner_cv_score, outer_cv_score = training(
-            df, feat_cols, target, greeks
-        )
-        if len(ocv_scores) > 1 and outer_cv_score < np.min(ocv_scores):
-            best_feat_cols = feat_cols
-
-        icv_scores.append(inner_cv_score)
-        ocv_scores.append(outer_cv_score)
-        feat_col_list.append(feat_cols)
-
-        feat_df = pd.DataFrame(feat_imps, index=feat_cols, columns=["importance"])
-        feat_df = feat_df.sort_values(by="importance", ascending=True)
-        feat_cols = feat_df.iloc[1:].index
-
-    _, _, feat_imps, inner_cv_score, outer_cv_score = training(
-        df, best_feat_cols, target, greeks
-    )
-    plot_importance(feat_imps, best_feat_cols)
-
-    plt.figure(figsize=(12, 6))
-    plt.plot(icv_scores, label="Inner CV score")
-    plt.plot(ocv_scores, label="Outer CV score")
-    plt.xlabel("Number of features dropped")
-    plt.ylabel("Metric score")
-    plt.legend()
-    plt.savefig("feat_reduction.png")
-    plt.close()
-
-    lowest_score_indices = np.argsort(ocv_scores)[:5]
-    for rank, i in enumerate(lowest_score_indices):
-        with open(f"top{rank}_feat_cols.txt", "w") as f:
-            f.write(str(feat_col_list[i]))
-            f.write(f"\nInner CV score: {icv_scores[i]:.5f}")
-            f.write(f"\nOuter CV score: {ocv_scores[i]:.5f}")
+    
+    training(df, feat_cols, target, greeks)
 
 
 if __name__ == "__main__":

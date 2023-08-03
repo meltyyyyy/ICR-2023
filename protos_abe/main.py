@@ -1,4 +1,4 @@
-import exps.baseline
+import exps.plot_prediction
 
 if __name__ == "__main__":
-    exps.baseline.main()
+    exps.plot_prediction.main()

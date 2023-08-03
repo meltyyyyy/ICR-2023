@@ -11,8 +11,31 @@ from utils.metrics import balanced_log_loss, lgb_metric
 warnings.filterwarnings("ignore")
 
 COMP_PATH = "/kaggle/input/icr-identify-age-related-conditions"
-COLS = ['DE', 'EL', 'GH', 'FE', 'DY', 'EE', 'EU', 'CH', 'CD ', 'CC', 'GL', 'DL',
-       'EB', 'AF', 'FI', 'DN', 'DA', 'FL', 'CR', 'FR', 'AB', 'BQ', 'DU']
+COLS = [
+    "DE",
+    "EL",
+    "GH",
+    "FE",
+    "DY",
+    "EE",
+    "EU",
+    "CH",
+    "CD ",
+    "CC",
+    "GL",
+    "DL",
+    "EB",
+    "AF",
+    "FI",
+    "DN",
+    "DA",
+    "FL",
+    "CR",
+    "FR",
+    "AB",
+    "BQ",
+    "DU",
+]
 
 
 def load_data():
