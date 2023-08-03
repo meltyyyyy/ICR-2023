@@ -1,7 +1,9 @@
 import warnings
 
+import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
+import seaborn as sns
 from lightgbm import LGBMClassifier
 from sklearn.model_selection import StratifiedKFold
 from sklearn.preprocessing import StandardScaler
@@ -22,7 +24,6 @@ def load_data():
     greeks = pd.read_csv(f"{COMP_PATH}/greeks.csv")
     return train, test, sample_submission, greeks
 
-
 def feature_eng(train, test):
     train.fillna(train.median(), inplace=True)
     test.fillna(test.median(), inplace=True)
@@ -36,6 +37,15 @@ def feature_eng(train, test):
     scaler = StandardScaler()
     df, test_df = train.copy(), test.copy()
     new_num_cols = train.select_dtypes(include=["float64"]).columns
+    # Perform feature aggregation on the datasets for the numerical columns
+    for column in new_num_cols:
+        df[column + "_mean"] = df[column].mean()
+        df[column + "_sum"] = df[column].sum()
+        df[column + "_std"] = df[column].std()
+
+        test_df[column + "_mean"] = test_df[column].mean()
+        test_df[column + "_sum"] = test_df[column].sum()
+        test_df[column + "_std"] = test_df[column].std()
     df[new_num_cols] = scaler.fit_transform(train[new_num_cols])
     test_df[new_num_cols] = scaler.transform(test[new_num_cols])
 
@@ -48,7 +58,7 @@ def to_int(df):
     return df
 
 
-def training(df, greeks):
+def training(df, feat_cols, target, greeks):
     kf = MultilabelStratifiedKFold(n_splits=5, shuffle=True, random_state=42)
     df["fold"] = -1
 
@@ -58,6 +68,7 @@ def training(df, greeks):
     metric = balanced_log_loss
     outer_cv_score = []  # store all cv scores of outer loop inference
     inner_cv_score = []  # store all cv scores of inner loop training
+    feat_imps = []
     models = []
     weights = []
 
@@ -66,12 +77,12 @@ def training(df, greeks):
         valid_df = df[df["fold"] == fold]
 
         X_train, y_train = (
-            train_df.drop(["Id", "Class", "fold"], axis=1),
-            train_df["Class"],
+            train_df.drop(["Id", "Class", "fold"], axis=1).loc[:, feat_cols],
+            train_df[target],
         )
         X_valid, y_valid = (
-            valid_df.drop(["Id", "Class", "fold"], axis=1),
-            valid_df["Class"],
+            valid_df.drop(["Id", "Class", "fold"], axis=1).loc[:, feat_cols],
+            valid_df[target],
         )
 
         lgb = LGBMClassifier(
@@ -95,7 +106,7 @@ def training(df, greeks):
         print(
             f"Outer Loop fold {fold}, Inner Loop Training with {X_train.shape[0]} samples, {X_train.shape[1]} features"
         )
-        for inner_fold, (fit_idx, val_idx) in enumerate(cv.split(X=X_train, y=y_train)):
+        for fold, (fit_idx, val_idx) in enumerate(cv.split(X=X_train, y=y_train)):
             X_fit = X_train.iloc[fit_idx]
             X_val = X_train.iloc[val_idx]
             y_fit = y_train.iloc[fit_idx]
@@ -109,13 +120,14 @@ def training(df, greeks):
                 eval_metric=lgb_metric,
             )
             inner_models.append(model)
-            val_preds = model.predict_proba(X_val)[:, 1]
+            val_preds = model.predict(X_val)
             oof_inner[val_idx] = val_preds
 
             val_score = balanced_log_loss(y_val, val_preds)
             best_iter = model.booster_.best_iteration
+            feat_imps.append(model.feature_importances_)
             print(
-                f"Fold: {inner_fold:>3}| {metric.__name__}: {val_score:.5f}"
+                f"Fold: {fold:>3}| {metric.__name__}: {val_score:.5f}"
                 f" | Best iteration: {best_iter:>4}"
             )
 
@@ -126,7 +138,7 @@ def training(df, greeks):
 
         preds = np.zeros(len(holdout))
         for model in inner_models:
-            preds += model.predict_proba(X_valid)[:, 1]
+            preds += model.predict(X_valid)
         preds = preds / len(inner_models)
         cv_score = metric(y_valid, preds)
 
@@ -146,7 +158,13 @@ def training(df, greeks):
     )
     print(f'{"*" * 50}\n')
 
-    return models, weights
+    return (
+        models,
+        weights,
+        np.mean(feat_imps, axis=0),
+        np.mean(inner_cv_score),
+        np.mean(outer_cv_score),
+    )
 
 
 def inferring(X, models, weights):
@@ -157,20 +175,72 @@ def inferring(X, models, weights):
     return y / sum([len(inner_models) for inner_models in models])
 
 
+def plot_importance(feat_imps, feat_cols):
+    feat_imps = np.squeeze(feat_imps)  # flatten feat_imps to 1D array
+    feat_df = pd.DataFrame(feat_imps, index=feat_cols, columns=["importance"])
+    feat_df = feat_df.sort_values(
+        by="importance", ascending=True
+    )  # sort DataFrame by importance
+
+    plt.figure(figsize=(12, 6))
+    plt.title("Mean feature importance")
+    sns.barplot(
+        x=feat_df["importance"], y=feat_df.index
+    )  # use sorted DataFrame for plotting
+    plt.savefig("feat_imps.png")
+    plt.close()
+
+
 def main():
     train, test, _, greeks = load_data()
     df, test_df = feature_eng(train, test)
-    feat_cols = df.columns[1:-1]
-    models, weights = training(df, greeks)
-    predictions = inferring(test_df[feat_cols], models, weights)
+    feat_cols = df.columns.drop("Class").tolist()
+    target = "Class"
 
-    test["class_1"] = predictions
-    test["class_0"] = 1 - predictions
+    _, _, feat_imps, inner_cv_score, outer_cv_score = training(
+        df, feat_cols, target, greeks
+    )
+    plot_importance(feat_imps, feat_cols)
+    icv_scores = []
+    ocv_scores = []
+    feat_col_list = []
+    best_feat_cols = feat_cols
 
-    test_2 = pd.read_csv(f"{COMP_PATH}/test.csv")
-    test["Id"] = test_2["Id"]
-    df_submission = test.loc[:, ["Id", "class_0", "class_1"]]
-    df_submission.to_csv("submission.csv", index=False)
+    while len(feat_cols) > 10:
+        _, _, feat_imps, inner_cv_score, outer_cv_score = training(
+            df, feat_cols, target, greeks
+        )
+        if len(ocv_scores) > 1 and outer_cv_score < np.min(ocv_scores):
+            best_feat_cols = feat_cols
+
+        icv_scores.append(inner_cv_score)
+        ocv_scores.append(outer_cv_score)
+        feat_col_list.append(feat_cols)
+
+        feat_df = pd.DataFrame(feat_imps, index=feat_cols, columns=["importance"])
+        feat_df = feat_df.sort_values(by="importance", ascending=True)
+        feat_cols = feat_df.iloc[5:].index
+
+    _, _, feat_imps, inner_cv_score, outer_cv_score = training(
+        df, best_feat_cols, target, greeks
+    )
+    plot_importance(feat_imps, best_feat_cols)
+
+    plt.figure(figsize=(12, 6))
+    plt.plot(icv_scores, label="Inner CV score")
+    plt.plot(ocv_scores, label="Outer CV score")
+    plt.xlabel("Number of features dropped")
+    plt.ylabel("Metric score")
+    plt.legend()
+    plt.savefig("feat_reduction.png")
+    plt.close()
+
+    lowest_score_indices = np.argsort(ocv_scores)[:5]
+    for rank, i in enumerate(lowest_score_indices):
+        with open(f"top{rank}_feat_cols.txt", "w") as f:
+            f.write(str(feat_col_list[i]))
+            f.write(f"\nInner CV score: {icv_scores[i]:.5f}")
+            f.write(f"\nOuter CV score: {ocv_scores[i]:.5f}")
 
 
 if __name__ == "__main__":

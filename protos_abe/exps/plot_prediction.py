@@ -1,10 +1,12 @@
 import warnings
 
+import seaborn as sns
 import numpy as np
 import pandas as pd
 from lightgbm import LGBMClassifier
 from sklearn.model_selection import StratifiedKFold
 from sklearn.preprocessing import StandardScaler
+import matplotlib.pyplot as plt
 from utils.constants import INT_DENOMINATORS
 from utils.metrics import balanced_log_loss, lgb_metric
 from utils.model_selection import MultilabelStratifiedKFold
@@ -48,7 +50,7 @@ def to_int(df):
     return df
 
 
-def training(df, greeks):
+def training(df, feat_cols, target, greeks):
     kf = MultilabelStratifiedKFold(n_splits=5, shuffle=True, random_state=42)
     df["fold"] = -1
 
@@ -58,20 +60,21 @@ def training(df, greeks):
     metric = balanced_log_loss
     outer_cv_score = []  # store all cv scores of outer loop inference
     inner_cv_score = []  # store all cv scores of inner loop training
+    feat_imps = []
     models = []
     weights = []
 
-    for fold in range(5):
-        train_df = df[df["fold"] != fold]
-        valid_df = df[df["fold"] == fold]
+    for outer_fold in range(5):
+        train_df = df[df["fold"] != outer_fold]
+        valid_df = df[df["fold"] == outer_fold]
 
         X_train, y_train = (
-            train_df.drop(["Id", "Class", "fold"], axis=1),
-            train_df["Class"],
+            train_df.drop(["Id", "Class", "fold"], axis=1).loc[:, feat_cols],
+            train_df[target],
         )
         X_valid, y_valid = (
-            valid_df.drop(["Id", "Class", "fold"], axis=1),
-            valid_df["Class"],
+            valid_df.drop(["Id", "Class", "fold"], axis=1).loc[:, feat_cols],
+            valid_df[target],
         )
 
         lgb = LGBMClassifier(
@@ -93,9 +96,9 @@ def training(df, greeks):
         cv = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
         inner_models = []
         print(
-            f"Outer Loop fold {fold}, Inner Loop Training with {X_train.shape[0]} samples, {X_train.shape[1]} features"
+            f"Outer Loop fold {outer_fold}, Inner Loop Training with {X_train.shape[0]} samples, {X_train.shape[1]} features"
         )
-        for inner_fold, (fit_idx, val_idx) in enumerate(cv.split(X=X_train, y=y_train)):
+        for fold, (fit_idx, val_idx) in enumerate(cv.split(X=X_train, y=y_train)):
             X_fit = X_train.iloc[fit_idx]
             X_val = X_train.iloc[val_idx]
             y_fit = y_train.iloc[fit_idx]
@@ -114,11 +117,13 @@ def training(df, greeks):
 
             val_score = balanced_log_loss(y_val, val_preds)
             best_iter = model.booster_.best_iteration
+            feat_imps.append(model.feature_importances_)
             print(
-                f"Fold: {inner_fold:>3}| {metric.__name__}: {val_score:.5f}"
+                f"Fold: {fold:>3}| {metric.__name__}: {val_score:.5f}"
                 f" | Best iteration: {best_iter:>4}"
             )
-
+        
+        plot_predictions_distribution(y_train, oof_inner, f"pred_dist{outer_fold}_80.png")
         mean_cv_score = metric(y_train, oof_inner)
         print(f"80% data CV score: {metric.__name__}: {mean_cv_score:.5f}")
         print(f'{"*" * 50}\n')
@@ -128,8 +133,8 @@ def training(df, greeks):
         for model in inner_models:
             preds += model.predict_proba(X_valid)[:, 1]
         preds = preds / len(inner_models)
+        plot_predictions_distribution(y_valid, preds, f"pred_dist{outer_fold}_20.png")
         cv_score = metric(y_valid, preds)
-
         print(f"20% data CV score: {metric.__name__}: {cv_score:.5f}")
         print(f'{"*" * 50}\n')
 
@@ -146,31 +151,50 @@ def training(df, greeks):
     )
     print(f'{"*" * 50}\n')
 
-    return models, weights
+    return models, weights, np.mean(feat_imps, axis=0), np.mean(inner_cv_score), np.mean(outer_cv_score)
 
 
-def inferring(X, models, weights):
-    y = np.zeros(len(X))
-    for i, model_list in enumerate(models):
-        for model in model_list:
-            y += weights[i] * model.predict(X)
-    return y / sum([len(inner_models) for inner_models in models])
+def plot_predictions_distribution(true_values, predictions, title="pred_dist.png"):
+    fig, ax = plt.subplots(figsize=(12, 6))
+    indexes = np.arange(len(predictions))  # Create an array of index values
+    true_values = np.array(true_values)  # Ensure true_values is an array for element-wise comparison
+    predictions = np.array(predictions)  # Ensure predictions is an array for element-wise comparison
+
+    # Plot all predictions and true values
+    ax.scatter(indexes, true_values, label='True Values', s=10)
+
+    # Create a mask for incorrect predictions where prob > 0.5 but true label is 0
+    incorrect_mask_1 = (predictions > 0.5) & (true_values == 0)
+
+    # Create a mask for incorrect predictions where prob < 0.5 but true label is 1
+    incorrect_mask_2 = (predictions < 0.5) & (true_values == 1)
+
+    # Create a mask for correct predictions
+    correct_mask = (predictions >= 0.5) & (true_values == 1) | (predictions < 0.5) & (true_values == 0)
+
+    # Plot the predictions using the masks for coloring
+    ax.scatter(indexes[correct_mask], predictions[correct_mask], label='Correct Predictions', alpha=0.5, s=10, color='blue')
+    ax.scatter(indexes[incorrect_mask_1], predictions[incorrect_mask_1], label='prob > 0.5 but true label is 0', alpha=0.5, s=10, color='red')
+    ax.scatter(indexes[incorrect_mask_2], predictions[incorrect_mask_2], label='prob < 0.5 but true label is 1', alpha=0.5, s=10, color='green')
+
+    ax.set_xlabel('Index')
+    ax.set_ylabel('Probability')
+    plt.title('Scatter plot of Predictions and True Values')
+    plt.legend(bbox_to_anchor=(1.05, 1), loc='upper left')
+    plt.savefig(title, bbox_inches='tight')
+    plt.close(fig)
+
+
+
 
 
 def main():
     train, test, _, greeks = load_data()
     df, test_df = feature_eng(train, test)
     feat_cols = df.columns[1:-1]
-    models, weights = training(df, greeks)
-    predictions = inferring(test_df[feat_cols], models, weights)
-
-    test["class_1"] = predictions
-    test["class_0"] = 1 - predictions
-
-    test_2 = pd.read_csv(f"{COMP_PATH}/test.csv")
-    test["Id"] = test_2["Id"]
-    df_submission = test.loc[:, ["Id", "class_0", "class_1"]]
-    df_submission.to_csv("submission.csv", index=False)
+    target = "Class"
+    
+    training(df, feat_cols, target, greeks)
 
 
 if __name__ == "__main__":

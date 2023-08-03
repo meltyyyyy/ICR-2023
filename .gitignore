@@ -1,1 +1,5 @@
 *.csv
+*.pyc
+*.png
+*.txt
+__pycache__
